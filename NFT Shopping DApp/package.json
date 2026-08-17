@@ -1,0 +1,25 @@
+{
+  "name": "nft-shopping-dapp",
+  "version": "1.0.0",
+  "description": "NFT shopping DApp with loyalty token rewards and IPFS (Pinata) image/metadata storage.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "compile": "hardhat compile",
+    "deploy:hoodi": "hardhat run scripts/deploy.js --network hoodi"
+  },
+  "dependencies": {
+    "axios": "^1.7.7",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1",
+    "form-data": "^4.0.1",
+    "multer": "^1.4.5-lts.1"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@openzeppelin/contracts": "5.1.0",
+    "hardhat": "^2.22.15"
+  }
+}
