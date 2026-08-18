@@ -1048,10 +1048,6 @@ function displayProducts(products) {
                 product.metadata?.name ||
                 "Unnamed product";
 
-            const description =
-                product.metadata?.description ||
-                "";
-
             const imageUrl =
                 convertIPFSUrl(
                     product.metadata?.image
@@ -1075,10 +1071,6 @@ function displayProducts(products) {
                     <h3>
                         ${escapeHtml(name)}
                     </h3>
-
-                    <p class="product-description">
-                        ${escapeHtml(description)}
-                    </p>
 
                     <div class="price">
                         ${priceFormatted} ETH
@@ -1283,10 +1275,7 @@ async function addProduct() {
                 "productName"
             );
 
-        const descriptionElement =
-            document.getElementById(
-                "productDescription"
-            );
+      
 
         const priceElement =
             document.getElementById(
@@ -1300,11 +1289,6 @@ async function addProduct() {
 
         const name =
             nameElement
-                ?.value
-                ?.trim();
-
-        const description =
-            descriptionElement
                 ?.value
                 ?.trim();
 
@@ -1325,15 +1309,6 @@ async function addProduct() {
 
             showToast(
                 "Enter a product name."
-            );
-
-            return;
-        }
-
-        if (!description) {
-
-            showToast(
-                "Enter a product description."
             );
 
             return;
@@ -1496,9 +1471,6 @@ async function addProduct() {
 
                             name:
                                 name,
-
-                            description:
-                                description,
 
                             image:
                                 imageURL
@@ -1790,11 +1762,6 @@ function clearForm() {
             "productName"
         );
 
-    const description =
-        document.getElementById(
-            "productDescription"
-        );
-
     const price =
         document.getElementById(
             "productPrice"
@@ -1808,11 +1775,6 @@ function clearForm() {
     if (name) {
 
         name.value = "";
-    }
-
-    if (description) {
-
-        description.value = "";
     }
 
     if (price) {

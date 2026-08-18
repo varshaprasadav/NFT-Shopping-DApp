@@ -292,11 +292,6 @@ app.post(
                     req.body?.name || ""
                 ).trim();
 
-            const description =
-                String(
-                    req.body?.description || ""
-                ).trim();
-
             const image =
                 String(
                     req.body?.image || ""
@@ -304,20 +299,18 @@ app.post(
 
             if (
                 !name ||
-                !description ||
                 !image
             ) {
 
                 return res.status(400).json({
                     success: false,
                     message:
-                        "Name, description and image are required."
+                        "Name and image are required."
                 });
             }
 
             const metadata = {
                 name,
-                description,
                 image
             };
 
