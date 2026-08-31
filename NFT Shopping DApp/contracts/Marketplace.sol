@@ -239,12 +239,27 @@ contract Marketplace {
 
 
     // =========================================================
+    // LOYALTY DISCOUNT SETTINGS
+    // =========================================================
+    //
+    // Hold at least DISCOUNT_THRESHOLD LOYAL tokens at the time
+    // of purchase and DISCOUNT_AMOUNT is automatically taken off
+    // the price - no manual redemption step. Those tokens are
+    // then burned as the "payment" for that discount.
+
+    uint256 public constant DISCOUNT_THRESHOLD =
+        3 ether; // 3 LOYAL tokens (18 decimals, same as ETH)
+
+    uint256 public constant DISCOUNT_AMOUNT =
+        0.5 ether; // 0.5 ETH off
+
+
+    // =========================================================
     // BUY PRODUCT
     // =========================================================
 
     function buyNFT(
-        uint256 tokenId,
-        uint256 loyaltyUsed
+        uint256 tokenId
     )
         external
         payable
@@ -264,34 +279,26 @@ contract Marketplace {
 
 
         // =====================================================
-        // LOYALTY PAYMENT
+        // AUTOMATIC LOYALTY DISCOUNT
         // =====================================================
 
         uint256 loyaltyValue = 0;
 
-        if (loyaltyUsed > 0) {
+        bool qualifiesForDiscount =
+            loyaltyToken.balanceOf(msg.sender) >=
+                DISCOUNT_THRESHOLD
+            &&
+            product.price >
+                DISCOUNT_AMOUNT;
 
-            uint256 balance =
-                loyaltyToken.balanceOf(
-                    msg.sender
-                );
-
-            require(
-                balance >= loyaltyUsed,
-                "Insufficient loyalty tokens"
-            );
+        if (qualifiesForDiscount) {
 
             loyaltyValue =
-                loyaltyUsed;
-
-            require(
-                loyaltyValue <= product.price,
-                "Too many loyalty tokens"
-            );
+                DISCOUNT_AMOUNT;
 
             loyaltyToken.redeemReward(
                 msg.sender,
-                loyaltyUsed
+                DISCOUNT_THRESHOLD
             );
         }
 
@@ -374,7 +381,7 @@ contract Marketplace {
             tokenId,
             msg.sender,
             ethToPay,
-            loyaltyUsed
+            loyaltyValue
         );
 
 

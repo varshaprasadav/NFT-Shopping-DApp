@@ -42,7 +42,7 @@ const marketplaceABI = [
 
     "function mintAndList(string metadataURI,uint256 price) returns(uint256)",
 
-    "function buyNFT(uint256 tokenId,uint256 loyaltyUsed) payable",
+    "function buyNFT(uint256 tokenId) payable",
 
     "function getProduct(uint256 tokenId) view returns(uint256,address,uint256,string,bool)",
 
@@ -509,6 +509,24 @@ async function connectWallet() {
         ) {
 
             await loadRewardBalance();
+        }
+
+        // ====================================================
+        // PROMPT METAMASK TO WATCH THE LOYAL TOKEN
+        // ====================================================
+        //
+        // MetaMask never auto-detects custom ERC-20 tokens on a
+        // testnet. wallet_watchAsset is the closest thing to
+        // "automatic" - it shows one MetaMask popup asking the
+        // user to confirm adding the token, instead of making
+        // them manually copy/paste the contract address.
+
+        if (
+            typeof addLoyaltyTokenToMetaMask ===
+            "function"
+        ) {
+
+            await addLoyaltyTokenToMetaMask();
         }
 
     } catch (error) {
@@ -1911,97 +1929,27 @@ async function buyProduct(tokenId) {
             );
 
         // ====================================================
-        // ASK CUSTOMER HOW MANY LOYAL TO USE
+        // AUTOMATIC LOYALTY DISCOUNT
         // ====================================================
+        //
+        // Mirrors Marketplace.sol exactly: hold at least
+        // DISCOUNT_THRESHOLD LOYAL tokens and DISCOUNT_AMOUNT
+        // is automatically taken off - no manual entry needed.
 
-        let loyaltyUsed =
-            0n;
+        const DISCOUNT_THRESHOLD =
+            ethers.parseEther("3");
 
-        if (
-            loyaltyBalance > 0n
-        ) {
+        const DISCOUNT_AMOUNT =
+            ethers.parseEther("0.5");
 
-            const input =
-                prompt(
-                    `Product price: ${productPriceFormatted} ETH\n` +
-                    `Your LOYAL balance: ${loyaltyBalanceFormatted} LOYAL\n\n` +
-                    `How many LOYAL tokens do you want to use?\n` +
-                    `Enter 0 to pay completely with ETH.`
-                );
+        const qualifiesForDiscount =
+            loyaltyBalance >= DISCOUNT_THRESHOLD &&
+            productPrice > DISCOUNT_AMOUNT;
 
-            // User pressed Cancel
-            if (
-                input === null
-            ) {
-
-                return;
-            }
-
-            const loyaltyText =
-                input.trim();
-
-            if (
-                loyaltyText === ""
-            ) {
-
-                loyaltyUsed =
-                    0n;
-
-            } else {
-
-                if (
-                    !/^\d+(\.\d+)?$/.test(
-                        loyaltyText
-                    )
-                ) {
-
-                    showToast(
-                        "Enter a valid LOYAL amount."
-                    );
-
-                    return;
-                }
-
-                loyaltyUsed =
-                    ethers.parseUnits(
-                        loyaltyText,
-                        18
-                    );
-            }
-
-        } else {
-
-            loyaltyUsed =
-                0n;
-        }
-
-        // ====================================================
-        // CHECK LOYALTY AMOUNT
-        // ====================================================
-
-        if (
-            loyaltyUsed >
-            loyaltyBalance
-        ) {
-
-            showToast(
-                "You do not have enough LOYAL tokens."
-            );
-
-            return;
-        }
-
-        if (
-            loyaltyUsed >
-            productPrice
-        ) {
-
-            showToast(
-                "LOYAL discount cannot be greater than the product price."
-            );
-
-            return;
-        }
+        const loyaltyValue =
+            qualifiesForDiscount
+                ? DISCOUNT_AMOUNT
+                : 0n;
 
         // ====================================================
         // CALCULATE ETH
@@ -2009,16 +1957,16 @@ async function buyProduct(tokenId) {
 
         const ethToPay =
             productPrice -
-            loyaltyUsed;
+            loyaltyValue;
 
         const ethToPayFormatted =
             ethers.formatEther(
                 ethToPay
             );
 
-        const loyaltyUsedFormatted =
+        const loyaltyValueFormatted =
             ethers.formatEther(
-                loyaltyUsed
+                loyaltyValue
             );
 
         // ====================================================
@@ -2026,11 +1974,18 @@ async function buyProduct(tokenId) {
         // ====================================================
 
         const confirmationMessage =
-            `Purchase Product #${tokenId}\n\n` +
-            `Product price: ${productPriceFormatted} ETH\n` +
-            `LOYAL used: ${loyaltyUsedFormatted}\n` +
-            `ETH to pay: ${ethToPayFormatted} ETH\n\n` +
-            `Continue with the purchase?`;
+            qualifiesForDiscount
+                ? `Purchase Product #${tokenId}\n\n` +
+                  `Product price: ${productPriceFormatted} ETH\n` +
+                  `You hold ${loyaltyBalanceFormatted} LOYAL - ` +
+                  `you qualify for a ${loyaltyValueFormatted} ETH discount!\n` +
+                  `3 LOYAL tokens will be used.\n` +
+                  `ETH to pay: ${ethToPayFormatted} ETH\n\n` +
+                  `Continue with the purchase?`
+                : `Purchase Product #${tokenId}\n\n` +
+                  `Product price: ${productPriceFormatted} ETH\n` +
+                  `ETH to pay: ${ethToPayFormatted} ETH\n\n` +
+                  `Continue with the purchase?`;
 
         const confirmed =
             window.confirm(
@@ -2053,7 +2008,6 @@ async function buyProduct(tokenId) {
         const buyTx =
             await marketplace.buyNFT(
                 tokenId,
-                loyaltyUsed,
                 {
                     value:
                         ethToPay
@@ -2090,7 +2044,7 @@ async function buyProduct(tokenId) {
 
         console.log(
             "LOYAL used:",
-            loyaltyUsedFormatted
+            loyaltyValueFormatted
         );
 
         console.log(
@@ -2158,6 +2112,87 @@ async function buyProduct(tokenId) {
     } finally {
 
         setFormStatus("");
+    }
+}
+
+
+// ============================================================
+// ADD LOYAL TOKEN TO METAMASK (wallet_watchAsset)
+// ============================================================
+//
+// MetaMask can never truly auto-add a token with zero user
+// interaction - that would let any website silently plant
+// tokens in someone's wallet, which is a real security risk.
+// wallet_watchAsset is the standard, closest-to-automatic way:
+// it shows ONE MetaMask popup pre-filled with the token's
+// details, and the user just clicks "Add token". No manually
+// copying/pasting a contract address required.
+
+async function addLoyaltyTokenToMetaMask(
+    force
+) {
+
+    try {
+
+        if (
+            !window.ethereum ||
+            !LOYALTY_ADDRESS
+        ) {
+
+            return;
+        }
+
+        // Skip re-prompting automatically more than once per
+        // session - but always go through when the user clicks
+        // the "+ Add to Wallet" button themselves (force=true).
+        if (
+            !force &&
+            sessionStorage.getItem(
+                "loyaltyTokenWatchPrompted"
+            )
+        ) {
+
+            return;
+        }
+
+        await window.ethereum.request({
+
+            method:
+                "wallet_watchAsset",
+
+            params: {
+
+                type:
+                    "ERC20",
+
+                options: {
+
+                    address:
+                        LOYALTY_ADDRESS,
+
+                    symbol:
+                        "LOYAL",
+
+                    decimals:
+                        18
+                }
+            }
+        });
+
+        sessionStorage.setItem(
+            "loyaltyTokenWatchPrompted",
+            "true"
+        );
+
+    } catch (error) {
+
+        // User dismissed the popup, or their wallet doesn't
+        // support wallet_watchAsset - fail silently, this is a
+        // convenience feature, not a required step.
+        console.warn(
+            "Could not prompt to add LOYAL token:",
+            error
+        );
     }
 }
 
