@@ -1,5 +1,4 @@
-require("dotenv").config();
-
+require("dotenv").config({ override: true });
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
@@ -41,12 +40,7 @@ const foundFrontendPath =
 const FRONTEND_PATH =
     foundFrontendPath || frontendCandidates[0];
 
-// Fail loudly if the frontend folder wasn't found, instead of
-// silently falling back to a path that doesn't exist. This is
-// what previously caused express.static to match nothing, and
-// every request (including /app.js) to fall through to the
-// catch-all handler below, which served index.html's HTML
-// content in place of the real JS/CSS files.
+
 
 if (!foundFrontendPath) {
 
@@ -70,11 +64,7 @@ if (!foundFrontendPath) {
 app.use(
     express.static(FRONTEND_PATH, {
 
-        // Disable caching for static assets during development
-        // so browsers always fetch the latest app.js/style.css
-        // instead of reusing a stale cached copy. Remove/relax
-        // this once the app is deployed to production.
-
+       
         etag: false,
 
         lastModified: false,
@@ -372,17 +362,6 @@ app.post(
     }
 );
 
-// ============================================================
-// FRONTEND FALLBACK
-// ============================================================
-//
-// Only fall back to index.html for actual page navigations
-// (GET requests with no file extension, e.g. client-side
-// routes). Requests for missing static assets - app.js,
-// style.css, images, etc. - should 404 instead of silently
-// receiving index.html's HTML content back, which is what
-// was happening before and made a missing/misplaced app.js
-// look like "the old file is still loading" in the browser.
 
 app.use((req, res) => {
 

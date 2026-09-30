@@ -511,15 +511,7 @@ async function connectWallet() {
             await loadRewardBalance();
         }
 
-        // ====================================================
-        // PROMPT METAMASK TO WATCH THE LOYAL TOKEN
-        // ====================================================
-        //
-        // MetaMask never auto-detects custom ERC-20 tokens on a
-        // testnet. wallet_watchAsset is the closest thing to
-        // "automatic" - it shows one MetaMask popup asking the
-        // user to confirm adding the token, instead of making
-        // them manually copy/paste the contract address.
+     
 
         if (
             typeof addLoyaltyTokenToMetaMask ===
@@ -2116,17 +2108,6 @@ async function buyProduct(tokenId) {
 }
 
 
-// ============================================================
-// ADD LOYAL TOKEN TO METAMASK (wallet_watchAsset)
-// ============================================================
-//
-// MetaMask can never truly auto-add a token with zero user
-// interaction - that would let any website silently plant
-// tokens in someone's wallet, which is a real security risk.
-// wallet_watchAsset is the standard, closest-to-automatic way:
-// it shows ONE MetaMask popup pre-filled with the token's
-// details, and the user just clicks "Add token". No manually
-// copying/pasting a contract address required.
 
 async function addLoyaltyTokenToMetaMask(
     force
@@ -2142,9 +2123,6 @@ async function addLoyaltyTokenToMetaMask(
             return;
         }
 
-        // Skip re-prompting automatically more than once per
-        // session - but always go through when the user clicks
-        // the "+ Add to Wallet" button themselves (force=true).
         if (
             !force &&
             sessionStorage.getItem(
