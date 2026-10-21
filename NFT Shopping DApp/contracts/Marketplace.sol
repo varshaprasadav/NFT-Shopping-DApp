@@ -73,11 +73,43 @@ contract Marketplace {
 
 
     // =========================================================
+    // ADMIN
+    // =========================================================
+    
+    address public admin;
+
+    modifier onlyAdmin() {
+        require(
+            msg.sender == admin,
+            "Only admin can add products"
+        );
+        _;
+    }
+
+
+    // =========================================================
     // LOYALTY REWARD
     // =========================================================
 
-    uint256 public constant REWARD_AMOUNT =
-        1 ether;
+    
+
+    uint256 public constant MAX_ITEMS_PER_ORDER =
+        20;
+
+    function calculateReward(
+        uint256 ethPaid
+    )
+        public
+        pure
+        returns (uint256)
+    {
+        if (ethPaid < 1 ether)  return 0;
+        if (ethPaid <= 5 ether)  return 2 ether;   // 1 - 5 ETH
+        if (ethPaid <= 10 ether) return 4 ether;   // above 5 - 10
+        if (ethPaid <= 20 ether) return 6 ether;   // above 10 - 20
+        if (ethPaid <= 50 ether) return 10 ether;  // above 20 - 50
+        return 15 ether;                           // above 50
+    }
 
 
     // =========================================================
@@ -146,6 +178,8 @@ contract Marketplace {
             "Invalid loyalty address"
         );
 
+        admin = msg.sender;
+
         nftContract =
             INFT(_nftAddress);
 
@@ -181,17 +215,14 @@ contract Marketplace {
     // =========================================================
     // MINT + LIST PRODUCT (single transaction)
     // =========================================================
-    //
-    // Mints a brand-new NFT directly into this Marketplace's own
-    // custody (via mintForMarketplace) and lists it for sale, all
-    // in one call - so the seller only ever signs ONE transaction
-    // instead of mint -> approve -> list.
+  
 
     function mintAndList(
         string memory metadataURI,
         uint256 price
     )
         external
+        onlyAdmin
         returns (uint256)
     {
         require(
@@ -241,11 +272,7 @@ contract Marketplace {
     // =========================================================
     // LOYALTY DISCOUNT SETTINGS
     // =========================================================
-    //
-    // Hold at least DISCOUNT_THRESHOLD LOYAL tokens at the time
-    // of purchase and DISCOUNT_AMOUNT is automatically taken off
-    // the price - no manual redemption step. Those tokens are
-    // then burned as the "payment" for that discount.
+    
 
     uint256 public constant DISCOUNT_THRESHOLD =
         3 ether; // 3 LOYAL tokens (18 decimals, same as ETH)
@@ -255,46 +282,92 @@ contract Marketplace {
 
 
     // =========================================================
-    // BUY PRODUCT
+    // BUY ONE OR MANY PRODUCTS IN A SINGLE ORDER
     // =========================================================
+   
 
-    function buyNFT(
-        uint256 tokenId
+    event OrderCompleted(
+        address indexed buyer,
+        uint256 itemCount,
+        uint256 ethPaid,
+        uint256 loyaltyUsed,
+        uint256 loyaltyEarned
+    );
+
+    function buyProducts(
+        uint256[] calldata tokenIds,
+        bool useLoyalty
     )
         external
         payable
     {
-        Product storage product =
-            products[tokenId];
+        uint256 count =
+            tokenIds.length;
 
         require(
-            product.active,
-            "Product is not available"
+            count > 0,
+            "Cart is empty"
         );
 
         require(
-            msg.sender != product.seller,
-            "Seller cannot buy"
+            count <= MAX_ITEMS_PER_ORDER,
+            "Too many products in one order"
         );
 
 
         // =====================================================
-        // AUTOMATIC LOYALTY DISCOUNT
+        // CHECK PRODUCTS + ADD UP THE TOTAL
+        // =====================================================
+        
+
+        uint256 totalPrice = 0;
+
+        for (uint256 i = 0; i < count; i++) {
+
+            Product storage product =
+                products[tokenIds[i]];
+
+            require(
+                product.active,
+                "Product is not available"
+            );
+
+            require(
+                msg.sender != product.seller,
+                "Seller cannot buy"
+            );
+
+            product.active = false;
+
+            totalPrice += product.price;
+        }
+
+
+        // =====================================================
+        // OPTIONAL LOYALTY DISCOUNT (once per order)
         // =====================================================
 
         uint256 loyaltyValue = 0;
+        uint256 loyaltyBurned = 0;
 
-        bool qualifiesForDiscount =
-            loyaltyToken.balanceOf(msg.sender) >=
-                DISCOUNT_THRESHOLD
-            &&
-            product.price >
-                DISCOUNT_AMOUNT;
+        if (useLoyalty) {
 
-        if (qualifiesForDiscount) {
+            require(
+                loyaltyToken.balanceOf(msg.sender) >=
+                    DISCOUNT_THRESHOLD,
+                "Not enough LOYAL tokens"
+            );
+
+            require(
+                totalPrice > DISCOUNT_AMOUNT,
+                "Total too low for discount"
+            );
 
             loyaltyValue =
                 DISCOUNT_AMOUNT;
+
+            loyaltyBurned =
+                DISCOUNT_THRESHOLD;
 
             loyaltyToken.redeemReward(
                 msg.sender,
@@ -308,7 +381,7 @@ contract Marketplace {
         // =====================================================
 
         uint256 ethToPay =
-            product.price -
+            totalPrice -
             loyaltyValue;
 
         require(
@@ -316,22 +389,13 @@ contract Marketplace {
             "Insufficient ETH"
         );
 
-
-        // =====================================================
-        // CLOSE LISTING
-        // =====================================================
-
-        product.active = false;
-
-
-        // =====================================================
-        // PAY SELLER
-        // =====================================================
+        // Every product is listed by the admin, so the
+        // admin receives the payment.
 
         if (ethToPay > 0) {
 
             (bool success, ) =
-                payable(product.seller).call{
+                payable(admin).call{
                     value: ethToPay
                 }("");
 
@@ -343,61 +407,70 @@ contract Marketplace {
 
 
         // =====================================================
-        // TRANSFER NFT
+        // TRANSFER ALL NFTs TO THE BUYER
         // =====================================================
 
-        nftContract.safeTransferFrom(
-            address(this),
-            msg.sender,
-            tokenId
-        );
+        for (uint256 i = 0; i < count; i++) {
 
-
-        // =====================================================
-        // REWARD BUYER
-        // =====================================================
-        //
-        // Only reward when the buyer actually paid real ETH.
-        // If the purchase was fully covered by LOYAL tokens,
-        // no new token is minted - otherwise spending a token
-        // and immediately earning one back would make the
-        // balance look like it never changed.
-
-        if (ethToPay > 0) {
-
-            loyaltyToken.mintReward(
+            nftContract.safeTransferFrom(
+                address(this),
                 msg.sender,
-                REWARD_AMOUNT
+                tokenIds[i]
             );
 
-            emit LoyaltyRewarded(
+            emit ProductPurchased(
+                tokenIds[i],
                 msg.sender,
-                REWARD_AMOUNT
+                products[tokenIds[i]].price,
+                0
             );
         }
 
 
-        emit ProductPurchased(
-            tokenId,
+        // =====================================================
+        // REWARD BUYER BASED ON THE TOTAL ETH PAID
+        // =====================================================
+
+        // No new LOYAL on an order where LOYAL were used.
+
+        uint256 reward =
+            useLoyalty
+                ? 0
+                : calculateReward(
+                    ethToPay
+                );
+
+        if (reward > 0) {
+
+            loyaltyToken.mintReward(
+                msg.sender,
+                reward
+            );
+
+            emit LoyaltyRewarded(
+                msg.sender,
+                reward
+            );
+        }
+
+        emit OrderCompleted(
             msg.sender,
+            count,
             ethToPay,
-            loyaltyValue
+            loyaltyBurned,
+            reward
         );
 
 
         // =====================================================
-        // REFUND
+        // REFUND ANY EXTRA ETH
         // =====================================================
 
         if (msg.value > ethToPay) {
 
-            uint256 refund =
-                msg.value -
-                ethToPay;
-
             (bool refundSuccess, ) =
                 payable(msg.sender).call{
-                    value: refund
+                    value: msg.value - ethToPay
                 }("");
 
             require(

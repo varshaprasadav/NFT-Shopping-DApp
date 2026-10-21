@@ -11,6 +11,8 @@ const app = express();
 
 const PORT = process.env.PORT || 5000;
 
+const DEFAULT_GATEWAY = "https://gateway.pinata.cloud/ipfs/";
+
 // ============================================================
 // MIDDLEWARE
 // ============================================================
@@ -32,47 +34,29 @@ const frontendCandidates = [
     path.join(__dirname, "..", "frontend")
 ];
 
-const foundFrontendPath =
-    frontendCandidates.find((folder) =>
-        fs.existsSync(folder)
-    );
+const foundFrontendPath = frontendCandidates.find((folder) =>
+    fs.existsSync(folder)
+);
 
-const FRONTEND_PATH =
-    foundFrontendPath || frontendCandidates[0];
-
-
+const FRONTEND_PATH = foundFrontendPath || frontendCandidates[0];
 
 if (!foundFrontendPath) {
-
     console.warn(
         "WARNING: No 'frontend' folder found at either of:\n" +
-        frontendCandidates
-            .map((candidate) => "  - " + candidate)
-            .join("\n") +
+        frontendCandidates.map((candidate) => "  - " + candidate).join("\n") +
         "\nStatic files (app.js, style.css, images, etc.) will " +
         "NOT be served correctly until this is fixed. Falling " +
         "back to: " + FRONTEND_PATH
     );
-
 } else {
-
-    console.log(
-        "Serving frontend from: " + FRONTEND_PATH
-    );
+    console.log("Serving frontend from: " + FRONTEND_PATH);
 }
 
 app.use(
     express.static(FRONTEND_PATH, {
-
-       
         etag: false,
-
         lastModified: false,
-
-        cacheControl: false,
-
         setHeaders: (res) => {
-
             res.setHeader(
                 "Cache-Control",
                 "no-store, no-cache, must-revalidate"
@@ -93,14 +77,8 @@ const upload = multer({
     },
 
     fileFilter: (req, file, cb) => {
-
-        if (
-            !file.mimetype ||
-            !file.mimetype.startsWith("image/")
-        ) {
-            return cb(
-                new Error("Only image files are allowed.")
-            );
+        if (!file.mimetype || !file.mimetype.startsWith("image/")) {
+            return cb(new Error("Only image files are allowed."));
         }
 
         cb(null, true);
@@ -112,7 +90,6 @@ const upload = multer({
 // ============================================================
 
 app.get("/config", (req, res) => {
-
     const requiredVariables = [
         "NFT_ADDRESS",
         "MARKETPLACE_ADDRESS",
@@ -120,36 +97,23 @@ app.get("/config", (req, res) => {
         "PINATA_GATEWAY"
     ];
 
-    const missing =
-        requiredVariables.filter(
-            (variable) =>
-                !process.env[variable]
-        );
+    const missing = requiredVariables.filter(
+        (variable) => !process.env[variable]
+    );
 
     if (missing.length > 0) {
-
         return res.status(500).json({
             success: false,
-            message:
-                "Missing environment variables: " +
-                missing.join(", ")
+            message: "Missing environment variables: " + missing.join(", ")
         });
     }
 
     res.json({
         success: true,
-
-        nft:
-            process.env.NFT_ADDRESS,
-
-        marketplace:
-            process.env.MARKETPLACE_ADDRESS,
-
-        loyalty:
-            process.env.LOYALTY_ADDRESS,
-
-        pinataGateway:
-            process.env.PINATA_GATEWAY
+        nft: process.env.NFT_ADDRESS,
+        marketplace: process.env.MARKETPLACE_ADDRESS,
+        loyalty: process.env.LOYALTY_ADDRESS,
+        pinataGateway: process.env.PINATA_GATEWAY
     });
 });
 
@@ -157,97 +121,70 @@ app.get("/config", (req, res) => {
 // UPLOAD IMAGE
 // ============================================================
 
-app.post(
-    "/upload-image",
-    upload.single("image"),
-    async (req, res) => {
+app.post("/upload-image", (req, res) => {
+    upload.single("image")(req, res, async (uploadError) => {
+        if (uploadError) {
+            return res.status(400).json({
+                success: false,
+                message: uploadError.message || "Invalid upload."
+            });
+        }
 
         try {
-
             if (!process.env.PINATA_JWT) {
-
                 return res.status(500).json({
                     success: false,
-                    message:
-                        "PINATA_JWT is not configured."
+                    message: "PINATA_JWT is not configured."
                 });
             }
 
             if (!req.file) {
-
                 return res.status(400).json({
                     success: false,
-                    message:
-                        "Please select an image."
+                    message: "Please select an image."
                 });
             }
 
-            const formData =
-                new FormData();
+            const formData = new FormData();
 
-            formData.append(
-                "file",
-                req.file.buffer,
+            formData.append("file", req.file.buffer, {
+                filename: req.file.originalname,
+                contentType: req.file.mimetype
+            });
+
+            const response = await axios.post(
+                "https://api.pinata.cloud/pinning/pinFileToIPFS",
+                formData,
                 {
-                    filename:
-                        req.file.originalname,
-
-                    contentType:
-                        req.file.mimetype
+                    headers: {
+                        ...formData.getHeaders(),
+                        Authorization: `Bearer ${process.env.PINATA_JWT}`
+                    },
+                    maxContentLength: Infinity,
+                    maxBodyLength: Infinity,
+                    timeout: 120000
                 }
             );
 
-            const response =
-                await axios.post(
-                    "https://api.pinata.cloud/pinning/pinFileToIPFS",
-                    formData,
-                    {
-                        headers: {
-                            ...formData.getHeaders(),
-
-                            Authorization:
-                                `Bearer ${process.env.PINATA_JWT}`
-                        },
-
-                        maxContentLength:
-                            Infinity,
-
-                        maxBodyLength:
-                            Infinity,
-
-                        timeout:
-                            120000
-                    }
-                );
-
-            const cid =
-                response.data?.IpfsHash;
+            const cid = response.data?.IpfsHash;
 
             if (!cid) {
-
-                throw new Error(
-                    "Pinata did not return an IPFS CID."
-                );
+                throw new Error("Pinata did not return an IPFS CID.");
             }
 
             res.json({
                 success: true,
-
-                imageURL:
-                    `ipfs://${cid}`
+                imageURL: `ipfs://${cid}`
             });
 
         } catch (error) {
-
             console.error(
                 "Image upload error:",
-                error.response?.data ||
-                error.message
+                error.response?.data || error.message
             );
 
             res.status(500).json({
                 success: false,
-
                 message:
                     error.response?.data?.error ||
                     error.response?.data?.message ||
@@ -255,136 +192,102 @@ app.post(
                     "Image upload failed."
             });
         }
-    }
-);
+    });
+});
 
 // ============================================================
 // UPLOAD METADATA
 // ============================================================
 
-app.post(
-    "/upload-metadata",
-    async (req, res) => {
-
-        try {
-
-            if (!process.env.PINATA_JWT) {
-
-                return res.status(500).json({
-                    success: false,
-                    message:
-                        "PINATA_JWT is not configured."
-                });
-            }
-
-            const name =
-                String(
-                    req.body?.name || ""
-                ).trim();
-
-            const image =
-                String(
-                    req.body?.image || ""
-                ).trim();
-
-            if (
-                !name ||
-                !image
-            ) {
-
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Name and image are required."
-                });
-            }
-
-            const metadata = {
-                name,
-                image
-            };
-
-            const response =
-                await axios.post(
-                    "https://api.pinata.cloud/pinning/pinJSONToIPFS",
-
-                    metadata,
-
-                    {
-                        headers: {
-                            "Content-Type":
-                                "application/json",
-
-                            Authorization:
-                                `Bearer ${process.env.PINATA_JWT}`
-                        },
-
-                        timeout:
-                            120000
-                    }
-                );
-
-            const cid =
-                response.data?.IpfsHash;
-
-            if (!cid) {
-
-                throw new Error(
-                    "Pinata did not return an IPFS CID."
-                );
-            }
-
-            res.json({
-                success: true,
-
-                metadataURI:
-                    `ipfs://${cid}`
-            });
-
-        } catch (error) {
-
-            console.error(
-                "Metadata upload error:",
-                error.response?.data ||
-                error.message
-            );
-
-            res.status(500).json({
+app.post("/upload-metadata", async (req, res) => {
+    try {
+        if (!process.env.PINATA_JWT) {
+            return res.status(500).json({
                 success: false,
-
-                message:
-                    error.response?.data?.error ||
-                    error.response?.data?.message ||
-                    error.message ||
-                    "Metadata upload failed."
+                message: "PINATA_JWT is not configured."
             });
         }
-    }
-);
 
+        const name = String(req.body?.name || "").trim();
+        const image = String(req.body?.image || "").trim();
+
+        if (!name || !image) {
+            return res.status(400).json({
+                success: false,
+                message: "Name and image are required."
+            });
+        }
+
+       
+        const gateway = (process.env.PINATA_GATEWAY || DEFAULT_GATEWAY)
+            .trim()
+            .replace(/\/+$/, "");
+
+        const imageForMetadata = image.startsWith("ipfs://")
+            ? gateway + "/" + image.replace("ipfs://", "")
+            : image;
+
+        const metadata = {
+            name,
+            image: imageForMetadata
+        };
+
+        const response = await axios.post(
+            "https://api.pinata.cloud/pinning/pinJSONToIPFS",
+            metadata,
+            {
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${process.env.PINATA_JWT}`
+                },
+                timeout: 120000
+            }
+        );
+
+        const cid = response.data?.IpfsHash;
+
+        if (!cid) {
+            throw new Error("Pinata did not return an IPFS CID.");
+        }
+
+        
+        res.json({
+            success: true,
+            metadataURI: gateway + "/" + cid
+        });
+
+    } catch (error) {
+        console.error(
+            "Metadata upload error:",
+            error.response?.data || error.message
+        );
+
+        res.status(500).json({
+            success: false,
+            message:
+                error.response?.data?.error ||
+                error.response?.data?.message ||
+                error.message ||
+                "Metadata upload failed."
+        });
+    }
+});
+
+// ============================================================
+// FALLBACK
+// ============================================================
 
 app.use((req, res) => {
+    const looksLikeAssetRequest = path.extname(req.path) !== "";
 
-    const looksLikeAssetRequest =
-        path.extname(req.path) !== "";
-
-    if (
-        req.method !== "GET" ||
-        looksLikeAssetRequest
-    ) {
-
+    if (req.method !== "GET" || looksLikeAssetRequest) {
         return res.status(404).json({
             success: false,
             message: `Not found: ${req.path}`
         });
     }
 
-    res.sendFile(
-        path.join(
-            FRONTEND_PATH,
-            "index.html"
-        )
-    );
+    res.sendFile(path.join(FRONTEND_PATH, "index.html"));
 });
 
 // ============================================================
@@ -392,15 +295,9 @@ app.use((req, res) => {
 // ============================================================
 
 if (require.main === module) {
-
-    app.listen(
-        PORT,
-        () => {
-            console.log(
-                `Server running on http://localhost:${PORT}`
-            );
-        }
-    );
+    app.listen(PORT, () => {
+        console.log(`Server running on http://localhost:${PORT}`);
+    });
 }
 
 module.exports = app;

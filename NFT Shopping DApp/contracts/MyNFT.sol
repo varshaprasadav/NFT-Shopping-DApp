@@ -67,15 +67,7 @@ contract MyNFT is ERC721URIStorage, Ownable {
         return tokenId;
     }
 
-    // =========================================================
-    // MINT DIRECTLY TO MARKETPLACE (single-transaction listing)
-    // =========================================================
-    //
-    // Called only by the Marketplace contract itself. Mints the
-    // NFT straight into the Marketplace's own custody, so there
-    // is never a separate "approve" transaction needed before a
-    // product can be listed - the Marketplace already owns the
-    // token the moment it is minted.
+   
 
     function mintForMarketplace(
         string memory uri

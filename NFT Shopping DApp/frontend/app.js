@@ -1,4 +1,3 @@
-
 let provider = null;
 let signer = null;
 let account = null;
@@ -42,7 +41,11 @@ const marketplaceABI = [
 
     "function mintAndList(string metadataURI,uint256 price) returns(uint256)",
 
-    "function buyNFT(uint256 tokenId) payable",
+    "function buyProducts(uint256[] tokenIds, bool useLoyalty) payable",
+
+    "function admin() view returns(address)",
+
+    "function calculateReward(uint256 ethPaid) view returns(uint256)",
 
     "function getProduct(uint256 tokenId) view returns(uint256,address,uint256,string,bool)",
 
@@ -69,6 +72,515 @@ const loyaltyABI = [
 const LOYALTY_DECIMALS = 18;
 
 
+
+// ============================================================
+// ADMIN + CART STATE
+// ============================================================
+
+let isAdmin = false;
+
+let cart = [];                 // [{ tokenId, price (bigint), name }]
+
+let currentProducts = [];      // last products shown on the page
+
+
+// ============================================================
+// ADMIN CHECK  (only the admin account can add products)
+// ============================================================
+
+async function checkAdmin() {
+
+    try {
+
+        if (!marketplace || !account) {
+
+            isAdmin = false;
+
+        } else {
+
+            const adminAddress =
+                await marketplace.admin();
+
+            isAdmin =
+                adminAddress.toLowerCase() ===
+                account.toLowerCase();
+        }
+
+    } catch (error) {
+
+        console.error("Admin check error:", error);
+
+        isAdmin = false;
+    }
+
+    applyAdminUI();
+
+    return isAdmin;
+}
+
+function applyAdminUI() {
+
+    if (!document.getElementById("adminUiStyle")) {
+
+        const style =
+            document.createElement("style");
+
+        style.id = "adminUiStyle";
+
+        style.textContent =
+            ".admin-hidden{display:none !important;}";
+
+        document.head.appendChild(style);
+    }
+
+    // Everything that opens / submits the "add product" form.
+    const elements =
+        document.querySelectorAll(
+            "#addProductBtn, #productForm, " +
+            "[onclick*='showProductForm']"
+        );
+
+    elements.forEach(
+        (element) => {
+
+            element.classList.toggle(
+                "admin-hidden",
+                !isAdmin
+            );
+        }
+    );
+}
+
+
+// ============================================================
+// CART
+// ============================================================
+
+// Rules of the contract:
+//   discount : spend 3 LOYAL -> 0.5 ETH off the order total (once per order)
+//   reward   : below 1 ETH = 0, 1-5 = 2, 5-10 = 4, 10-20 = 6, 20-50 = 10,
+//              50+ = 15 LOYAL (none when LOYAL are used in the order)
+
+let cartUseLoyalty = false;     // true = use 3 LOYAL for 0.5 ETH off
+let cartTotalWei = 0n;          // subtotal of the cart
+let loyaltyBalanceCache = 0n;   // the buyer's LOYAL balance
+
+function discountLoyalWei() { return ethers.parseEther("3"); }
+
+function discountEthWei() { return ethers.parseEther("0.5"); }
+
+// same table as calculateReward() in Marketplace.sol
+function rewardFromEth(ethWei) {
+
+    const e = ethers.parseEther;
+
+    if (ethWei < e("1"))   return 0n;
+    if (ethWei <= e("5"))  return e("2");
+    if (ethWei <= e("10")) return e("4");
+    if (ethWei <= e("20")) return e("6");
+    if (ethWei <= e("50")) return e("10");
+
+    return e("15");
+}
+
+// 1.0 -> "1", 0.30 -> "0.3"
+function fmtNumber(wei) {
+
+    const text = ethers.formatEther(wei);
+
+    return text.includes(".")
+        ? text.replace(/0+$/, "").replace(/\.$/, "")
+        : text;
+}
+
+function ensureCartUI() {
+
+    if (document.getElementById("cartPanel")) {
+
+        return;
+    }
+
+    const style =
+        document.createElement("style");
+
+    style.textContent = `
+        .product-card .cart-btn{margin-top:10px;}
+
+        #cartPanel{position:fixed;right:18px;bottom:18px;width:340px;
+            max-height:90vh;overflow:auto;background:#fff;color:#1f2937;
+            border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.28);
+            font-family:inherit;font-size:14px;z-index:9999;
+            border:1px solid #e5e7eb;}
+
+        #cartPanel .cart-head{display:flex;justify-content:space-between;
+            align-items:center;padding:14px 16px;font-weight:700;
+            font-size:16px;color:#fff;
+            background:linear-gradient(135deg,#2b6cf0,#7c3aed);
+            border-radius:16px 16px 0 0;}
+        #cartPanel .cart-balance{font-size:12px;font-weight:600;
+            background:rgba(255,255,255,.22);padding:4px 10px;
+            border-radius:999px;}
+
+        #cartPanel .cart-items{max-height:150px;overflow:auto;
+            padding:8px 16px;}
+        #cartPanel .cart-row{display:flex;justify-content:space-between;
+            align-items:center;gap:8px;padding:7px 0;
+            border-bottom:1px dashed #e5e7eb;}
+        #cartPanel .cart-row:last-child{border-bottom:none;}
+        #cartPanel .cart-name{flex:1;font-weight:600;}
+        #cartPanel .cart-price{color:#374151;white-space:nowrap;}
+        #cartPanel .cart-remove{border:none;background:#fee2e2;color:#b91c1c;
+            width:22px;height:22px;border-radius:50%;cursor:pointer;
+            line-height:1;font-size:14px;padding:0;margin:0;}
+
+        #cartPanel .cart-summary{margin:4px 16px 10px;padding:12px;
+            background:#f9fafb;border-radius:12px;}
+        #cartPanel .cart-line{display:flex;justify-content:space-between;
+            padding:3px 0;}
+        #cartPanel .cart-line.discount{color:#047857;font-weight:600;}
+        #cartPanel .cart-line.pay{font-size:16px;margin-top:6px;
+            padding-top:8px;border-top:1px solid #e5e7eb;}
+        #cartPanel .cart-check{display:flex;align-items:center;gap:8px;
+            margin:10px 0 2px;padding:9px 10px;background:#eef2ff;
+            border-radius:8px;font-weight:600;cursor:pointer;}
+        #cartPanel .cart-check input{width:16px;height:16px;margin:0;}
+        #cartPanel .cart-note{font-size:12px;color:#6b7280;margin:2px 2px 6px;}
+        #cartPanel .cart-label{display:block;margin:10px 0 4px;
+            font-size:12px;font-weight:700;color:#6b7280;
+            text-transform:uppercase;letter-spacing:.04em;}
+        #cartPanel select{width:100%;padding:8px;border-radius:8px;
+            border:1px solid #d1d5db;background:#fff;font-size:14px;}
+        #cartPanel .cart-earn{margin-top:10px;padding:8px 10px;
+            background:#ecfdf5;color:#065f46;border-radius:8px;
+            text-align:center;}
+
+        #cartPanel .cart-rules{margin:0 16px 10px;padding:10px 12px;
+            border:1px solid #e5e7eb;border-radius:12px;font-size:12px;
+            color:#4b5563;}
+        #cartPanel .cart-rules b{color:#111827;}
+        #cartPanel .cart-rules table{width:100%;border-collapse:collapse;
+            margin:4px 0 8px;}
+        #cartPanel .cart-rules td{padding:3px 0;border-top:1px solid #f3f4f6;}
+        #cartPanel .cart-rules td:last-child{text-align:right;}
+
+        #cartPanel .cart-actions{display:flex;gap:8px;padding:0 16px 16px;}
+        #cartPanel .cart-actions button{flex:1;cursor:pointer;padding:10px;
+            border-radius:10px;border:1px solid #d1d5db;background:#f3f4f6;
+            font-weight:600;font-size:14px;margin:0;}
+        #cartPanel .cart-actions button.primary{flex:2;color:#fff;
+            border:none;background:linear-gradient(135deg,#2b6cf0,#7c3aed);}
+    `;
+
+    document.head.appendChild(style);
+
+    const panel =
+        document.createElement("div");
+
+    panel.id = "cartPanel";
+
+    panel.style.display = "none";
+
+    panel.innerHTML = `
+        <div class="cart-head">
+            <span>&#128722; Your Cart (<span id="cartCount">0</span>)</span>
+            <span class="cart-balance">
+                You have <b id="cartLoyalBalance">0</b> LOYAL
+            </span>
+        </div>
+
+        <div class="cart-items" id="cartItems"></div>
+
+        <div class="cart-summary">
+            <div class="cart-line">
+                <span>Subtotal</span>
+                <span><b id="cartTotal">0</b> ETH</span>
+            </div>
+
+            <label class="cart-check">
+                <input type="checkbox" id="cartUseLoyalty">
+                Use 3 LOYAL for 0.5 ETH off
+            </label>
+            <div class="cart-note" id="cartLoyaltyNote"></div>
+
+            <div class="cart-line discount">
+                <span>Discount</span>
+                <span id="cartDiscount">- 0 ETH</span>
+            </div>
+
+            <div class="cart-line pay">
+                <span>You pay</span>
+                <span><b id="cartPay">0</b> ETH</span>
+            </div>
+
+            <div class="cart-earn">
+                You will earn <b id="cartEarn">0</b> LOYAL
+            </div>
+        </div>
+
+        <div class="cart-rules">
+            <b>Earn LOYAL on each order</b>
+            <table>
+                <tr><td>Below 1 ETH</td><td><b>0 LOYAL</b></td></tr>
+                <tr><td>1 to 5 ETH</td><td><b>2 LOYAL</b></td></tr>
+                <tr><td>Above 5 to 10 ETH</td><td><b>4 LOYAL</b></td></tr>
+                <tr><td>Above 10 to 20 ETH</td><td><b>6 LOYAL</b></td></tr>
+                <tr><td>Above 20 to 50 ETH</td><td><b>10 LOYAL</b></td></tr>
+                <tr><td>Above 50 ETH</td><td><b>15 LOYAL</b></td></tr>
+            </table>
+            <b>Discount:</b> 3 LOYAL = 0.5 ETH off (once per order).
+            An order that uses LOYAL earns no new LOYAL.
+            Using points is optional. Save them for later if you like.
+        </div>
+
+        <div class="cart-actions">
+            <button id="cartClearBtn">Clear</button>
+            <button class="primary" id="cartCheckoutBtn">Buy all</button>
+        </div>
+    `;
+
+    document.body.appendChild(panel);
+
+    document
+        .getElementById("cartCheckoutBtn")
+        .addEventListener("click", checkoutCart);
+
+    document
+        .getElementById("cartClearBtn")
+        .addEventListener(
+            "click",
+            () => {
+                cart = [];
+                cartUseLoyalty = false;
+                renderCart();
+            }
+        );
+
+    document
+        .getElementById("cartUseLoyalty")
+        .addEventListener(
+            "change",
+            (event) => {
+                cartUseLoyalty = event.target.checked;
+                updateCartSummary();
+            }
+        );
+}
+
+function isInCart(tokenId) {
+
+    return cart.some(
+        (item) => item.tokenId === Number(tokenId)
+    );
+}
+
+function toggleCart(tokenId) {
+
+    tokenId = Number(tokenId);
+
+    if (isInCart(tokenId)) {
+
+        cart = cart.filter(
+            (item) => item.tokenId !== tokenId
+        );
+
+    } else {
+
+        const product =
+            currentProducts.find(
+                (p) => Number(p.tokenId) === tokenId
+            );
+
+        if (!product || !product.active) {
+
+            showToast("This product is not available.");
+
+            return;
+        }
+
+        cart.push({
+            tokenId: tokenId,
+            price: BigInt(product.price),
+            name:
+                product.metadata?.name ||
+                `NFT #${tokenId}`
+        });
+    }
+
+    renderCart();
+}
+
+function renderCart() {
+
+    ensureCartUI();
+
+    // drop sold products
+    cart = cart.filter(
+        (item) => {
+
+            const p =
+                currentProducts.find(
+                    (x) => Number(x.tokenId) === item.tokenId
+                );
+
+            return !p || p.active;
+        }
+    );
+
+    const panel =
+        document.getElementById("cartPanel");
+
+    const list =
+        document.getElementById("cartItems");
+
+    let total = 0n;
+
+    list.innerHTML = "";
+
+    cart.forEach(
+        (item) => {
+
+            total += item.price;
+
+            const row =
+                document.createElement("div");
+
+            row.className = "cart-row";
+
+            row.innerHTML =
+                `<span class="cart-name">${escapeHtml(item.name)}</span>` +
+                `<span class="cart-price">${fmtNumber(item.price)} ETH</span>` +
+                `<button class="cart-remove" title="Remove" ` +
+                `onclick="toggleCart(${item.tokenId})">&times;</button>`;
+
+            list.appendChild(row);
+        }
+    );
+
+    cartTotalWei = total;
+
+    document.getElementById("cartCount").textContent =
+        cart.length;
+
+    panel.style.display =
+        cart.length > 0 ? "block" : "none";
+
+    // update every "Add to Cart" button on the page
+    document
+        .querySelectorAll("[data-cart-btn]")
+        .forEach(
+            (button) => {
+
+                button.textContent =
+                    isInCart(button.dataset.cartBtn)
+                        ? "Remove from Cart"
+                        : "Add to Cart";
+            }
+        );
+
+    updateCartSummary();
+
+    refreshCartBalance();
+}
+
+// ------------------------------------------------------------
+// CART SUMMARY: subtotal, discount, final price, LOYAL earned
+// ------------------------------------------------------------
+
+function updateCartSummary() {
+
+    const checkbox =
+        document.getElementById("cartUseLoyalty");
+
+    if (!checkbox) {
+
+        return;
+    }
+
+    const enoughLoyal =
+        loyaltyBalanceCache >= discountLoyalWei();
+
+    const bigEnough =
+        cartTotalWei > discountEthWei();
+
+    const canUse =
+        enoughLoyal && bigEnough;
+
+    if (!canUse) {
+
+        cartUseLoyalty = false;
+    }
+
+    checkbox.disabled = !canUse;
+
+    checkbox.checked = cartUseLoyalty;
+
+    document.getElementById("cartLoyaltyNote").textContent =
+        !enoughLoyal
+            ? "You need at least 3 LOYAL to use the discount."
+            : !bigEnough
+                ? "Order total must be more than 0.5 ETH."
+                : "Optional. Using LOYAL earns no new LOYAL on this order.";
+
+    const discount =
+        cartUseLoyalty
+            ? discountEthWei()
+            : 0n;
+
+    const pay =
+        cartTotalWei - discount;
+
+    // no new LOYAL on an order where LOYAL are used
+    const earn =
+        cartUseLoyalty
+            ? 0n
+            : rewardFromEth(pay);
+
+    document.getElementById("cartTotal").textContent =
+        fmtNumber(cartTotalWei);
+
+    document.getElementById("cartDiscount").textContent =
+        `- ${fmtNumber(discount)} ETH`;
+
+    document.getElementById("cartPay").textContent =
+        fmtNumber(pay);
+
+    document.getElementById("cartEarn").textContent =
+        fmtNumber(earn);
+
+    document.getElementById("cartLoyalBalance").textContent =
+        fmtNumber(loyaltyBalanceCache);
+}
+
+async function refreshCartBalance() {
+
+    try {
+
+        if (!marketplace || !account) {
+
+            loyaltyBalanceCache = 0n;
+
+        } else {
+
+            loyaltyBalanceCache =
+                await marketplace.getLoyaltyBalance(account);
+        }
+
+        updateCartSummary();
+
+    } catch (error) {
+
+        console.error("Cart balance error:", error);
+    }
+}
+
+async function checkoutCart() {
+
+    await checkout(
+        cart.map((item) => item.tokenId),
+        cartUseLoyalty
+    );
+}
+
 const DEFAULT_PINATA_GATEWAY =
     "https://gateway.pinata.cloud/ipfs/";
 
@@ -83,6 +595,10 @@ document.addEventListener(
         console.log(
             "NFT Shopping DApp loading..."
         );
+
+        applyAdminUI();   // hide "add product" until admin is verified
+
+        ensureCartUI();
 
         try {
 
@@ -655,6 +1171,8 @@ function updateWalletUI() {
         walletAddress.textContent =
             shortenAddress(account);
     }
+
+    checkAdmin();
 }
 
 
@@ -1030,6 +1548,8 @@ function displayProducts(products) {
 
     container.innerHTML = "";
 
+    currentProducts = products || [];
+
     if (
         !products ||
         products.length === 0
@@ -1107,12 +1627,23 @@ function displayProducts(products) {
                         }
                     </button>
 
+                    <button
+                        class="buy-btn cart-btn"
+                        data-cart-btn="${product.tokenId}"
+                        onclick="toggleCart(${product.tokenId})"
+                        ${!product.active ? "disabled" : ""}
+                    >
+                        Add to Cart
+                    </button>
+
                 </div>
             `;
 
             container.appendChild(card);
         }
     );
+
+    renderCart();
 }
 
 
@@ -1253,6 +1784,19 @@ async function addProduct() {
 
             showToast(
                 "Please connect your wallet first."
+            );
+
+            return;
+        }
+
+        // ====================================================
+        // ONLY THE ADMIN CAN ADD PRODUCTS
+        // ====================================================
+
+        if (!(await checkAdmin())) {
+
+            showToast(
+                "Only the admin account can add products."
             );
 
             return;
@@ -1803,27 +2347,24 @@ function clearForm() {
 
 async function buyProduct(tokenId) {
 
+    // "Buy Product" button = an order with just this one product
+    await checkout([Number(tokenId)]);
+}
+
+async function checkout(tokenIds, preChosenLoyalty) {
+
     try {
 
         // ====================================================
-        // CHECK WALLET
+        // CHECK WALLET + CONTRACT
         // ====================================================
 
-        if (
-            !signer ||
-            !account
-        ) {
+        if (!signer || !account) {
 
-            showToast(
-                "Please connect your wallet first."
-            );
+            showToast("Please connect your wallet first.");
 
             return;
         }
-
-        // ====================================================
-        // CHECK MARKETPLACE
-        // ====================================================
 
         if (!marketplace) {
 
@@ -1832,101 +2373,70 @@ async function buyProduct(tokenId) {
             );
         }
 
-        // ====================================================
-        // GET PRODUCT
-        // ====================================================
+        if (!tokenIds || tokenIds.length === 0) {
 
-        const product =
-            await marketplace.getProduct(
-                tokenId
-            );
-
-        /*
-         * product[0] = tokenId
-         * product[1] = seller
-         * product[2] = price
-         * product[3] = metadataURI
-         * product[4] = active
-         */
-
-        const productPrice =
-            product[2];
-
-        const seller =
-            product[1];
-
-        const active =
-            product[4];
-
-        // ====================================================
-        // CHECK PRODUCT
-        // ====================================================
-
-        if (!active) {
-
-            showToast(
-                "This product is no longer available."
-            );
-
-            await loadProducts();
-
-            return;
-        }
-
-        if (
-            seller.toLowerCase() ===
-            account.toLowerCase()
-        ) {
-
-            showToast(
-                "You cannot buy your own product."
-            );
+            showToast("Your cart is empty.");
 
             return;
         }
 
         // ====================================================
-        // GET LOYALTY BALANCE
+        // CHECK EVERY PRODUCT + ADD UP THE TOTAL
         // ====================================================
 
-        let loyaltyBalance =
-            0n;
+        let totalPrice = 0n;
+
+        for (const tokenId of tokenIds) {
+
+            const product =
+                await marketplace.getProduct(tokenId);
+
+            // product[1] = seller, product[2] = price, product[4] = active
+
+            if (!product[4]) {
+
+                showToast(
+                    `NFT #${tokenId} is no longer available.`
+                );
+
+                await loadProducts();
+
+                return;
+            }
+
+            if (
+                product[1].toLowerCase() ===
+                account.toLowerCase()
+            ) {
+
+                showToast(
+                    "You cannot buy your own product."
+                );
+
+                return;
+            }
+
+            totalPrice += product[2];
+        }
+
+        const totalFormatted =
+            ethers.formatEther(totalPrice);
+
+        // ====================================================
+        // LOYALTY DISCOUNT (once per order, on the total)
+        // ====================================================
+
+        let loyaltyBalance = 0n;
 
         try {
 
             loyaltyBalance =
-                await marketplace.getLoyaltyBalance(
-                    account
-                );
+                await marketplace.getLoyaltyBalance(account);
 
         } catch (error) {
 
-            console.error(
-                "Loyalty balance error:",
-                error
-            );
-
-            loyaltyBalance =
-                0n;
+            console.error("Loyalty balance error:", error);
         }
-
-        const loyaltyBalanceFormatted =
-            ethers.formatEther(
-                loyaltyBalance
-            );
-
-        const productPriceFormatted =
-            ethers.formatEther(
-                productPrice
-            );
-
-        // ====================================================
-        // AUTOMATIC LOYALTY DISCOUNT
-        // ====================================================
-        //
-        // Mirrors Marketplace.sol exactly: hold at least
-        // DISCOUNT_THRESHOLD LOYAL tokens and DISCOUNT_AMOUNT
-        // is automatically taken off - no manual entry needed.
 
         const DISCOUNT_THRESHOLD =
             ethers.parseEther("3");
@@ -1934,170 +2444,119 @@ async function buyProduct(tokenId) {
         const DISCOUNT_AMOUNT =
             ethers.parseEther("0.5");
 
-        const qualifiesForDiscount =
+        const canUseLoyalty =
             loyaltyBalance >= DISCOUNT_THRESHOLD &&
-            productPrice > DISCOUNT_AMOUNT;
+            totalPrice > DISCOUNT_AMOUNT;
 
-        const loyaltyValue =
-            qualifiesForDiscount
-                ? DISCOUNT_AMOUNT
-                : 0n;
+        // LOYAL earned is calculated by the contract on the ETH paid
+        async function rewardFor(ethAmount) {
 
-        // ====================================================
-        // CALCULATE ETH
-        // ====================================================
+            try {
 
-        const ethToPay =
-            productPrice -
-            loyaltyValue;
+                return await marketplace.calculateReward(ethAmount);
 
-        const ethToPayFormatted =
-            ethers.formatEther(
-                ethToPay
-            );
+            } catch (error) {
 
-        const loyaltyValueFormatted =
-            ethers.formatEther(
-                loyaltyValue
-            );
-
-        // ====================================================
-        // FINAL CONFIRMATION
-        // ====================================================
-
-        const confirmationMessage =
-            qualifiesForDiscount
-                ? `Purchase Product #${tokenId}\n\n` +
-                  `Product price: ${productPriceFormatted} ETH\n` +
-                  `You hold ${loyaltyBalanceFormatted} LOYAL - ` +
-                  `you qualify for a ${loyaltyValueFormatted} ETH discount!\n` +
-                  `3 LOYAL tokens will be used.\n` +
-                  `ETH to pay: ${ethToPayFormatted} ETH\n\n` +
-                  `Continue with the purchase?`
-                : `Purchase Product #${tokenId}\n\n` +
-                  `Product price: ${productPriceFormatted} ETH\n` +
-                  `ETH to pay: ${ethToPayFormatted} ETH\n\n` +
-                  `Continue with the purchase?`;
-
-        const confirmed =
-            window.confirm(
-                confirmationMessage
-            );
-
-        if (!confirmed) {
-
-            return;
+                return 0n;
+            }
         }
 
+        let useLoyalty = false;
+
+        if (preChosenLoyalty !== undefined) {
+
+            // the buyer already decided in the cart
+            useLoyalty =
+                canUseLoyalty && preChosenLoyalty === true;
+
+        } else if (canUseLoyalty) {
+
+            const discounted = totalPrice - DISCOUNT_AMOUNT;
+
+            const rewardWithout = await rewardFor(totalPrice);
+
+            // OK = use LOYAL, Cancel = no LOYAL (pay full, keep tokens)
+            useLoyalty = window.confirm(
+                `${tokenIds.length} product(s), total ${totalFormatted} ETH.\n\n` +
+                `OK = Use 3 LOYAL now, pay ${ethers.formatEther(discounted)} ETH` +
+                ` (earn 0 LOYAL on this order)\n` +
+                `Cancel = Skip discount, keep my LOYAL for next time, pay full ${totalFormatted} ETH` +
+                ` (earn ${ethers.formatEther(rewardWithout)} LOYAL)`
+            );
+        }
+
+        const ethToPay =
+            useLoyalty
+                ? totalPrice - DISCOUNT_AMOUNT
+                : totalPrice;
+
+        // no new LOYAL on an order where LOYAL are used
+        const earned =
+            useLoyalty
+                ? 0n
+                : await rewardFor(totalPrice);
+
         // ====================================================
-        // BUY
+        // BUY (one transaction for the whole order)
         // ====================================================
 
-        showToast(
-            "Confirm purchase in MetaMask."
-        );
+        showToast("Confirm purchase in MetaMask.");
 
         const buyTx =
-            await marketplace.buyNFT(
-                tokenId,
-                {
-                    value:
-                        ethToPay
-                }
+            await marketplace.buyProducts(
+                tokenIds,
+                useLoyalty,
+                { value: ethToPay }
             );
 
-        console.log(
-            "Purchase transaction:",
-            buyTx.hash
-        );
-
-        // ====================================================
-        // WAIT
-        // ====================================================
-
-        setFormStatus(
-            "Waiting for purchase confirmation..."
-        );
+        setFormStatus("Waiting for purchase confirmation...");
 
         await buyTx.wait();
 
-        // ====================================================
-        // SUCCESS
-        // ====================================================
-
-        console.log(
-            "Product purchased successfully."
-        );
-
-        console.log(
-            "NFT:",
-            tokenId
-        );
-
-        console.log(
-            "LOYAL used:",
-            loyaltyValueFormatted
-        );
-
-        console.log(
-            "ETH paid:",
-            ethToPayFormatted
-        );
-
-        console.log(
-            "Purchase transaction:",
-            buyTx.hash
-        );
+        console.log("Order purchased:", buyTx.hash);
+        console.log("NFTs:", tokenIds);
+        console.log("ETH paid:", ethers.formatEther(ethToPay));
 
         // ====================================================
-        // REFRESH PRODUCTS
+        // REFRESH
         // ====================================================
+
+        cart = cart.filter(
+            (item) => !tokenIds.includes(item.tokenId)
+        );
+
+        cartUseLoyalty = false;
 
         await loadProducts();
 
-        // ====================================================
-        // REFRESH LOYALTY BALANCE
-        // ====================================================
-
-        if (
-            typeof loadRewardBalance ===
-            "function"
-        ) {
+        if (typeof loadRewardBalance === "function") {
 
             await loadRewardBalance();
         }
 
+        renderCart();
+
         showToast(
-            `Purchase successful! NFT #${tokenId}. You received 1 LOYAL reward.`
+            earned > 0n
+                ? `Purchase successful! You earned ${ethers.formatEther(earned)} LOYAL.`
+                : "Purchase successful! Spend 1 ETH or more, without using LOYAL, to earn LOYAL."
         );
 
     } catch (error) {
 
-        console.error(
-            "Buy Product Error:",
-            error
-        );
-
-        const message =
-            getErrorMessage(
-                error
-            );
+        console.error("Checkout Error:", error);
 
         if (
             error?.code === 4001 ||
-            error?.code ===
-            "ACTION_REJECTED"
+            error?.code === "ACTION_REJECTED"
         ) {
 
-            showToast(
-                "Transaction rejected in MetaMask."
-            );
+            showToast("Transaction rejected in MetaMask.");
 
         } else {
 
             showToast(
-                "Purchase failed: " +
-                message
+                "Purchase failed: " + getErrorMessage(error)
             );
         }
 
@@ -2164,9 +2623,7 @@ async function addLoyaltyTokenToMetaMask(
 
     } catch (error) {
 
-        // User dismissed the popup, or their wallet doesn't
-        // support wallet_watchAsset - fail silently, this is a
-        // convenience feature, not a required step.
+       
         console.warn(
             "Could not prompt to add LOYAL token:",
             error
